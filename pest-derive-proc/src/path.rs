@@ -27,13 +27,11 @@ impl<'a> GrammarNodeEmitter<'a> for GrammarNodeData<Cow<'a, Path>> {
             )))?;
             Ok(())
         }
-        let path = &self.data();
-        let root = env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-        let path = std::path::absolute(Path::new(&root).join(path))
-            .map_err(|err| syn::Error::new(Span::call_site(), err))?;
+        let path = self.data();
         if path.is_file() {
-            emit_path(path, handler)?;
+            emit_path(path.to_path_buf(), handler)?;
         } else if path.is_dir() {
+            let root = env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
             for path in path.read_dir().unwrap() {
                 let path = path.unwrap().path();
                 if path.is_file() {
@@ -52,8 +50,10 @@ impl<'a> GrammarNodeEmitter<'a> for GrammarNodeData<Cow<'a, Path>> {
 
 impl<'a> syn::parse::Parse for GrammarNodeData<Cow<'a, Path>> {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
-        let inner = input.parse::<LitStr>()?.value();
-        let path = Path::new(&inner).to_path_buf();
-        Ok(GrammarNodeData::new::<Cow<'_, Path>>(None, path.into()))
+        let path = input.parse::<LitStr>()?.value();
+        let root = env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+        let path = std::path::absolute(Path::new(&root).join(path))
+            .map_err(|err| syn::Error::new(Span::call_site(), err))?;
+        Ok(GrammarNodeData::new(None, path.into()))
     }
 }

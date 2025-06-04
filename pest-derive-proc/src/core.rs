@@ -79,12 +79,12 @@ impl<'a> Parse for GrammarDefinition<'a> {
             GrammarAttribute::NonExhaustive => {
                 non_exhaustive = true;
             }
-        });
+        })?;
         Ok(GrammarDefinition {
             ident: item.ident,
             generics: item.generics,
             non_exhaustive,
-            nodes: Vec::new(),
+            nodes: grammar_sources,
         })
     }
 }
@@ -121,10 +121,6 @@ where
                             Path::new(&root).join("src/").join(path)
                         };
 
-                        let file_name = match path.file_name() {
-                            Some(file_name) => file_name,
-                            None => panic!("grammar attribute should point to a file"),
-                        };
                         handler(GrammarAttribute::Node(GrammarNode::Path(
                             GrammarNodeData::new(None, path.into()),
                         )));
@@ -152,7 +148,7 @@ pub struct GrammarNodeData<T> {
     data: T,
 }
 #[derive(Clone, PartialEq)]
-pub(crate) enum GrammarNode<'a> {
+pub enum GrammarNode<'a> {
     Path(GrammarNodeData<Cow<'a, Path>>),
     Inline(GrammarNodeData<Cow<'a, str>>),
     Definition(GrammarNodeData<RuleDefinition<'a>>),
@@ -177,7 +173,7 @@ impl<'a> From<GrammarDefinition<'a>> for ParsedDerive {
     }
 }
 #[derive(Clone)]
-pub(crate) enum GrammarAttribute<'a> {
+pub enum GrammarAttribute<'a> {
     Node(GrammarNode<'a>),
     NonExhaustive,
 }

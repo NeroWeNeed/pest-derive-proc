@@ -1,10 +1,5 @@
 use core::fmt;
-use std::{
-    borrow::Cow,
-    fmt::Write,
-    path::{Path, PathBuf},
-    usize,
-};
+use std::{borrow::Cow, fmt::Write, path::Path, usize};
 
 use proc_macro2::Span;
 use syn::{
@@ -22,12 +17,9 @@ trait RuleStep<'a> {
         F: RuleVisitor<'a>;
 }
 trait RuleVisitor<'a> {
-    fn visit(&mut self, evt: RuleEvent<'a>);
+    fn visit(&mut self, evt: GrammarNodeTerminal<'a>);
 }
-enum RuleEvent<'a> {
-    Node(GrammarNodeTerminal<'a>),
-    RootRule(String),
-}
+
 #[derive(Clone)]
 enum Node<'a> {
     Sequence(Punctuated<Node<'a>, Token![~]>),
@@ -36,9 +28,9 @@ enum Node<'a> {
     Predicate(Box<Node<'a>>, PredicateType),
     String(LitStr),
     CharacterRange(LitChar, LitChar),
-    RuleRef(String, bool),
+    RuleRef(String),
     Collection(Vec<Node<'a>>),
-    Emission(GrammarNodeTerminal<'a>),
+    Terminal(GrammarNodeTerminal<'a>),
     Empty,
 }
 #[derive(Debug, Clone)]
@@ -72,8 +64,7 @@ impl<'a> From<GrammarNodeTerminal<'a>> for GrammarNode<'a> {
 fn handle_rule_fn<'b, 'c>(ident: Ident, input: ParseStream<'b>) -> syn::Result<Node<'c>> {
     match ident.to_string().as_str() {
         "path" => {
-            let value = Path::new(&input.parse::<LitStr>()?.value()).to_path_buf();
-            let value = GrammarNodeData::new::<Cow<'_, Path>>(None, value.into());
+            let value = GrammarNodeData::<Cow<'_, Path>>::parse(input)?;
             if input.peek2(LitChar) {
                 input.parse::<Token![,]>()?;
                 let delimiter = input.parse::<LitChar>()?.value();
@@ -83,10 +74,10 @@ fn handle_rule_fn<'b, 'c>(ident: Ident, input: ParseStream<'b>) -> syn::Result<N
                     let mut punctuated: Punctuated<Node, Token![|]> = Punctuated::new();
                     value.emit(&mut |node| {
                         if let Some(root_rule) = node.clone().rule() {
-                            output.push(Node::Emission(node.try_into()?));
-                            punctuated.push_value(Node::RuleRef(root_rule.clone(), true));
+                            output.push(Node::Terminal(node.try_into()?));
+                            punctuated.push_value(Node::RuleRef(root_rule.clone()));
                         } else {
-                            output.push(Node::Emission(node.try_into()?));
+                            output.push(Node::Terminal(node.try_into()?));
                         }
                         Ok(())
                     })?;
@@ -96,10 +87,10 @@ fn handle_rule_fn<'b, 'c>(ident: Ident, input: ParseStream<'b>) -> syn::Result<N
                     let mut punctuated: Punctuated<Node, Token![~]> = Punctuated::new();
                     value.emit(&mut |node| {
                         if let Some(root_rule) = node.clone().rule() {
-                            output.push(Node::Emission(node.try_into()?));
-                            punctuated.push_value(Node::RuleRef(root_rule.clone(), true));
+                            output.push(Node::Terminal(node.try_into()?));
+                            punctuated.push_value(Node::RuleRef(root_rule.clone()));
                         } else {
-                            output.push(Node::Emission(node.try_into()?));
+                            output.push(Node::Terminal(node.try_into()?));
                         }
                         Ok(())
                     })?;
@@ -127,11 +118,11 @@ fn handle_rule_fn<'b, 'c>(ident: Ident, input: ParseStream<'b>) -> syn::Result<N
                 if let Some(node) = output {
                     if let Some(root_rule) = node.clone().rule() {
                         Ok(Node::Collection(vec![
-                            Node::Emission(node.try_into()?),
-                            Node::RuleRef(root_rule.clone(), true),
+                            Node::Terminal(node.try_into()?),
+                            Node::RuleRef(root_rule.clone()),
                         ]))
                     } else {
-                        Ok(Node::Emission(node.try_into()?))
+                        Ok(Node::Terminal(node.try_into()?))
                     }
                 } else {
                     Ok(Node::Empty)
@@ -232,11 +223,8 @@ impl<'a> RuleStep<'a> for Node<'a> {
             Node::CharacterRange(start, end) => {
                 output.write_fmt(format_args!("'{}'..'{}'", start.value(), end.value()))?;
             }
-            Node::RuleRef(ident, expose) => {
+            Node::RuleRef(ident) => {
                 output.write_fmt(format_args!("{}", ident))?;
-                if *expose {
-                    handler.visit(RuleEvent::RootRule(ident.to_string()))
-                }
             }
             Node::Empty => {}
             Node::Collection(nodes) => {
@@ -244,7 +232,7 @@ impl<'a> RuleStep<'a> for Node<'a> {
                     node.step(handler, output)?;
                 }
             }
-            Node::Emission(grammar_node) => handler.visit(RuleEvent::Node(grammar_node.clone())),
+            Node::Terminal(grammar_node) => handler.visit(grammar_node.clone()),
         }
         Ok(())
     }
@@ -280,7 +268,7 @@ impl<'a> Parse for Node<'a> {
                     parenthesized!(inner in input);
                     handle_rule_fn(ident, &inner)
                 } else {
-                    Ok(Node::RuleRef(ident.to_string(), false))
+                    Ok(Node::RuleRef(ident.to_string()))
                 }
             } else if input.peek(LitChar) {
                 let start = input.parse::<LitChar>()?;
@@ -495,18 +483,10 @@ impl<'a> Parse for GrammarNodeData<RuleDefinition<'a>> {
 #[derive(Default)]
 struct RuleStepper<'a> {
     pub sources: Vec<GrammarNode<'a>>,
-    roots: Vec<String>,
 }
 impl<'a> RuleVisitor<'a> for RuleStepper<'a> {
-    fn visit(&mut self, evt: RuleEvent<'a>) {
-        match evt {
-            RuleEvent::Node(grammar_node) => {
-                self.sources.push(grammar_node.into());
-            }
-            RuleEvent::RootRule(ident) => {
-                self.roots.push(ident.to_string());
-            }
-        }
+    fn visit(&mut self, value: GrammarNodeTerminal<'a>) {
+        self.sources.push(value.into());
     }
 }
 
@@ -515,20 +495,28 @@ impl<'a> GrammarNodeEmitter<'a> for GrammarNodeData<RuleDefinition<'a>> {
     where
         F: FnMut(GrammarNode<'a>) -> syn::Result<()>,
     {
+        let result = self.build(&mut *handler)?;
+        handler(result)
+    }
+}
+
+impl<'a> GrammarNodeData<RuleDefinition<'a>> {
+    pub fn build<F>(self, handler: &mut F) -> syn::Result<GrammarNode<'a>>
+    where
+        F: FnMut(GrammarNode<'a>) -> syn::Result<()>,
+    {
         let mut output = String::new();
         let mut stepper = RuleStepper::default();
 
         self.step(&mut stepper, &mut output)
             .map_err(|err| syn::Error::new(Span::call_site(), err))?;
-        let RuleStepper { sources, roots } = stepper;
+        let RuleStepper { sources } = stepper;
         for source in sources.into_iter() {
             handler(source)?;
         }
-        handler(GrammarNode::Inline(GrammarNodeData::new(
+        Ok(GrammarNode::Inline(GrammarNodeData::new(
             self.rule().cloned(),
             output.into(),
-        )))?;
-
-        Ok(())
+        )))
     }
 }

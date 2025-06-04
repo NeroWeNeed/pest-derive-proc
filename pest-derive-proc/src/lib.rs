@@ -5,18 +5,14 @@ use core::*;
 mod constructor;
 
 use std::collections::VecDeque;
-use std::env;
-use std::fs::File;
-use std::io::{self, Read};
-use std::path::Path;
 
 use pest_generator::docs;
 use pest_generator::generator::generate;
-use pest_generator::parse_derive::ParsedDerive;
 use pest_meta::parser::{self, Rule, rename_meta_rule};
 use pest_meta::{optimizer, unwrap_or_report, validator};
 use proc_macro2::{Span, TokenStream};
-use syn::{DeriveInput, Ident, parse_macro_input};
+use quote::quote;
+use syn::{Ident, parse_macro_input};
 
 #[proc_macro_derive(ParserProc, attributes(grammar))]
 pub fn derive_parser(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -25,7 +21,7 @@ pub fn derive_parser(input: proc_macro::TokenStream) -> proc_macro::TokenStream 
     let mut paths = vec![];
     let mut nodes = VecDeque::new();
     let mut rules = vec![];
-    nodes.extend(definition.nodes);
+    nodes.extend(definition.nodes.clone());
     while let Some(node) = nodes.pop_front() {
         match node {
             GrammarNode::Path(node) => {
@@ -41,31 +37,42 @@ pub fn derive_parser(input: proc_macro::TokenStream) -> proc_macro::TokenStream 
                 data.push_str(node.data());
             }
             GrammarNode::Definition(node) => {
-                if let Some(rule) = node.rule()
-                    && !rule.starts_with("_")
-                {
-                    let mut rule_group = Vec::new();
-                    match node.emit(&mut |node| {
-                        if let Some(rule) = node.rule() {
-                            rule_group.push(rule);
+                let output = if let Some(rule) = node.rule() {
+                    if !rule.starts_with("_") {
+                        let rule = rule.clone();
+                        let mut rule_group = Vec::new();
+                        match node.build(&mut |node| {
+                            if let Some(rule) = node.rule() {
+                                rule_group.push(rule.clone());
+                            }
+                            nodes.push_front(node);
+                            Ok(())
+                        }) {
+                            Ok(output) => {
+                                rules.push((rule, rule_group));
+                                Ok(output)
+                            }
+                            err => err,
                         }
-                        nodes.push_front(node);
-                        Ok(())
-                    }) {
-                        Ok(_) => {
-                            rules.push((rule, rule_group));
-                        }
-                        Err(err) => {
-                            return err.to_compile_error();
-                        }
-                    };
+                    } else {
+                        node.build(&mut |node| {
+                            nodes.push_front(node);
+                            Ok(())
+                        })
+                    }
                 } else {
-                    if let Err(err) = node.emit(&mut |node| {
+                    node.build(&mut |node| {
                         nodes.push_front(node);
                         Ok(())
-                    }) {
-                        return err.to_compile_error();
-                    };
+                    })
+                };
+                match output {
+                    Ok(node) => {
+                        nodes.push_front(node);
+                    }
+                    Err(err) => {
+                        return err.to_compile_error().into();
+                    }
                 }
             }
         };
@@ -80,16 +87,16 @@ pub fn derive_parser(input: proc_macro::TokenStream) -> proc_macro::TokenStream 
     let ast = unwrap_or_report(parser::consume_rules(pairs));
     let optimized = optimizer::optimize(ast);
     let parsed_derive = definition.into();
-    generate(
+    let mut output = generate(
         parsed_derive,
         paths,
         optimized,
         defaults,
         &doc_comment,
         true,
-    )
-    .extend(generate_rule_macros(rules))
-    .into()
+    );
+    output.extend(generate_rule_macros(&rules));
+    output.into()
 }
 fn generate_rule_macros(routes: &[(String, Vec<String>)]) -> TokenStream {
     if !routes.is_empty() {
