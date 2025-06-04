@@ -1,0 +1,10 @@
+[workspace]
+members = ["pest-derive-proc"]
+resolver = "3"
+
+[workspace.dependencies]
+pest_generator = "2.8.0"
+pest_meta = "2.8.0"
+syn = "2.0"
+quote = "1.0"
+proc-macro2 = "1.0"
